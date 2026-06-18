@@ -1,0 +1,5 @@
+{
+    "name": "alpha-f1-position-change-production",
+    "description": "当需要读取期货前20席位持仓突变 Alpha 的生产计算结果时，使用此 skill。该 skill 只读取已生成的 Parquet 结果，不在调用时重新计算因子。",
+    "tags": ["quant", "alpha", "production", "future"]
+}
