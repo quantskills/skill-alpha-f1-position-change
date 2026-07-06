@@ -78,3 +78,6 @@ htmlcov/
 dmypy.json
 
 /node_modules/
+
+# 报告生成产物（HTML / JSON 不入 git，避免大文件污染仓库）
+reports/

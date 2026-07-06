@@ -12,7 +12,7 @@ import panda_data
 FACTOR_ID = "F1"
 FACTOR_NAME = "期货前20席位持仓突变"
 CHANGE_THRESHOLD = 0.02  # 2% 变化阈值
-BATCH_SIZE = 8  # 单次 API 调用最多 8 个品种，避免服务器超限
+BATCH_SIZE = 4  # 单次 API 调用最多 8 个品种，避免服务器超限
 REQUIRED_COLUMNS = {"underlying_symbol", "date", "broker_name", "net_position", "position_type"}
 
 
@@ -54,7 +54,7 @@ def load_position_data(
         if not start_date:
             # 往前三个月
             end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-            start_dt = end_dt - timedelta(days=90)
+            start_dt = end_dt - timedelta(days=180)
             start_date = start_dt.strftime("%Y-%m-%d")
 
     # 转换为 YYYYMMDD 格式给 panda_data
