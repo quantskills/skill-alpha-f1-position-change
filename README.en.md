@@ -2,7 +2,7 @@
 
 [简体中文](README.md) | **English**
 
-> Futures Top-20 Position Breakout Alpha factor: computes long/short breakout signals from PandaAI futures position data and produces verifiable factor tables with backtest metrics.
+> Futures Top-20 Position Breakout Alpha factor: computes long/short breakout signals from PandaAI futures position data and produces verifiable factor tables, backtest metrics, and a self-contained HTML visualization report.
 
 <p align="center">
   <img alt="libraries" src="https://img.shields.io/badge/libraries-Futures%20Top20%20Position-blue">
@@ -23,7 +23,7 @@ This Skill is suitable for:
 - Complete workflows for factor validation, contract checking, and IC-stability backtesting
 - Triggering deterministic factor computation and backtesting from Claude Code conversations
 
-This Skill pulls real position and price data via the `panda_data` SDK, outputting factor tables, backtest metrics (IC/ICIR/layered returns/Calmar), and offline fixtures for CI integration.
+This Skill pulls real position and price data via the `panda_data` SDK, outputting factor tables, backtest metrics (IC/ICIR/layered returns/Calmar), a self-contained HTML visualization report, and offline fixtures for CI integration.
 
 ## Repository Contents
 
@@ -33,8 +33,11 @@ This Skill pulls real position and price data via the `panda_data` SDK, outputti
 | `scripts/factor.py` | Factor computation entry (positions → factor table) |
 | `scripts/validate.py` | Factor validation (contract checks + IC stability + offline mode) |
 | `scripts/backtest.py` | Backtest evaluation (real price returns for IC/ICIR) |
+| `scripts/backtest_report_data.py` | Backtest timeseries wrapper (HTML report data source) |
+| `scripts/report.py` | HTML report generator entry (matplotlib static charts) |
 | `scripts/save_fixture.py` | One-time offline fixture generator |
 | `scripts/fixtures/` | Offline test data (Parquet format) |
+| `requirements.txt` | Python dependencies |
 | `references/data_guide.md` | PandaAI data API reference |
 | `LICENSE` | GPLv3 license |
 | `README.md` / `README.en.md` | Chinese / English README |
@@ -47,16 +50,22 @@ skill-alpha-f1-position-change/
 ├── README.md
 ├── README.en.md
 ├── LICENSE
+├── requirements.txt
 ├── references/
 │   └── data_guide.md
-└── scripts/
-    ├── factor.py            # Factor compute (load_position_data / load_price_data)
-    ├── validate.py          # Validation (check_factor_contract 11 assertions)
-    ├── backtest.py          # Backtest (strict forward_return)
-    ├── save_fixture.py      # Offline fixture generator
-    └── fixtures/            # Offline test data (generated after first run)
-        ├── sample_positions.parquet
-        └── sample_prices.parquet
+├── scripts/
+│   ├── factor.py                  # Factor compute (load_position_data / load_price_data)
+│   ├── validate.py                # Validation (check_factor_contract 11 assertions)
+│   ├── backtest.py                # Backtest (strict forward_return)
+│   ├── backtest_report_data.py    # Timeseries wrapper (keeps curve / daily_ic / drawdown)
+│   ├── report.py                  # HTML report generator (matplotlib + base64)
+│   ├── save_fixture.py            # Offline fixture generator
+│   └── fixtures/                  # Offline test data (generated after first run)
+│       ├── sample_positions.parquet
+│       └── sample_prices.parquet
+└── reports/                       # Report artifacts (.gitignored)
+    ├── backtest_result.json       # Intermediate data (full timeseries)
+    └── report.html                # Final HTML report (self-contained)
 ```
 
 ## Data Requirements
@@ -91,7 +100,7 @@ export PANDA_DATA_START_DATE=2026-01-01
 export PANDA_DATA_END_DATE=2026-03-31
 ```
 
-### Three-Step Run
+### Four-Step Run
 
 ```bash
 cd scripts/
@@ -107,6 +116,10 @@ python validate.py
 # 3. Backtest evaluation
 python backtest.py
 # Output: IC, ICIR, Rank IC, Rank ICIR, layered returns, Calmar, MDD, turnover
+
+# 4. HTML report generation
+python report.py
+# Output: reports/report.html (self-contained, with 4 base64-embedded charts)
 ```
 
 ### Offline Mode (CI Friendly)
@@ -119,9 +132,14 @@ python save_fixture.py
 # 2. Subsequent validation without network
 export PANDA_DATA_OFFLINE=1
 python validate.py
+
+# 3. Generate HTML report offline (no credentials needed, opens in browser)
+python report.py --offline --open
 ```
 
 `check_factor_contract` (11 contract assertions) always runs offline and does not depend on any fixture.
+
+In offline mode, if `panda_data` SDK is not installed locally, `report.py` automatically injects a stub module to bypass `factor.py`'s top-level import; when pyarrow 19 is incompatible with legacy parquet files, it falls back to `fastparquet`.
 
 ## Input Configuration
 
@@ -190,6 +208,49 @@ Factor table fields output by `factor.py`:
 | `data_version` | Data version (`real-v1`) |
 | `update_time` | Latest data date + A-share close time 15:30 (ISO 8601) |
 
+## HTML Backtest Report
+
+`scripts/report.py` renders the backtest result as a self-contained single HTML file (base64-embedded charts, viewable offline). Default output is `reports/report.html`, with intermediate `reports/backtest_result.json` in the same directory.
+
+### Report Contents
+
+| Section | Description |
+|---|---|
+| Summary cards | 8 core metrics: IC / ICIR / Rank IC / Rank ICIR / IR(SHR*) / CR / ARR / MDD |
+| Sample statistics | Total samples, buy/sell/hold signal counts, turnover |
+| Layered return comparison | Low vs High group mean returns and spread |
+| Cumulative return & drawdown | Two subplots: cumulative return (top), drawdown fill (bottom) |
+| Daily IC time series | Pearson IC vs Rank IC, two-line comparison |
+| Signal distribution by date | Stacked buy/sell/hold counts per trading day |
+| Top 20 symbols by signal | Horizontal stacked bars, sorted by total signal count |
+| Top 20 symbols detail table | Symbol / Buy / Sell / Hold / Total |
+| Evaluation convention | Strict convention `forward_return = close_{t+1}/open_{t+1} - 1` |
+
+### CLI Arguments
+
+| Argument | Default | Description |
+|---|---|---|
+| `--offline` | False | Force offline mode (uses fixtures, no credentials) |
+| `--json-path` | `reports/backtest_result.json` | Intermediate JSON output path |
+| `--html-path` | `reports/report.html` | Final HTML output path |
+| `--dpi` | 100 | Chart DPI (controls PNG size) |
+| `--open` | False | Auto-open in default browser after generation |
+
+### Examples
+
+```bash
+# Offline mode (most common)
+python scripts/report.py --offline --open
+
+# Custom output path
+python scripts/report.py --offline --html-path reports/custom.html
+
+# Reduce HTML size (for email attachments)
+python scripts/report.py --offline --dpi 80
+```
+
+Chart labels inside the report are in English (to avoid matplotlib Chinese font cross-platform issues); HTML text is in English in this README's version. A single HTML is about 250KB at dpi=100.
+
 ## Recommendations for Large-Scale Runs
 
 - **API batching**: Single API call ≤ 8 instruments (`BATCH_SIZE = 8`) to avoid server limits
@@ -231,7 +292,7 @@ First-half and second-half sample ICs must have same sign and `|IC| > 0.02` (ind
 
 ### Completed (as of 2026-07)
 
-13 rounds of fixes:
+14 rounds of fixes:
 
 | Round | Topic |
 |---|---|
@@ -246,6 +307,7 @@ First-half and second-half sample ICs must have same sign and `|IC| > 0.02` (ind
 | 10 | Pure-long instrument KeyError defense |
 | 11 | `_load_fixture_or_network` online prices loading |
 | 12 | Dynamic `update_time` derivation (latest data date + 15:30) |
+| 13 | HTML backtest report generation (`backtest_report_data.py` + `report.py` + matplotlib) |
 
 ### Known Uncovered
 

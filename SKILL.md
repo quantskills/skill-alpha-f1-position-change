@@ -101,7 +101,10 @@ Agent 使用本 skill 时，应在 `开发产物` 目录下执行命令，优先
 python scripts/factor.py
 python scripts/validate.py
 python scripts/backtest.py
+python scripts/report.py
 ```
+
+第四步 `report.py` 生成 HTML 回测报告（`reports/report.html`），含 4 张图、8 张指标卡片、Top 20 品种表，self-contained 单文件可离线查看。
 
 运行前需要设置 `PANDA_DATA_USERNAME` 和 `PANDA_DATA_PASSWORD` 环境变量。
 可选设置 `PANDA_DATA_START_DATE` 和 `PANDA_DATA_END_DATE` 控制样本区间。
@@ -125,18 +128,35 @@ python scripts/validate.py
 - 若仅生成 positions fixture（无 prices fixture），`check_ic_stability` 自动跳过，其它 check 全部正常
 - `check_factor_contract`（10 条契约断言）始终离线可跑，不依赖任何 fixture
 
+### HTML 报告生成（CI 友好）
+
+```bash
+# 离线模式生成 HTML 报告（无需凭证）
+python scripts/report.py --offline
+# 输出：reports/report.html + reports/backtest_result.json
+
+# 自动用浏览器打开
+python scripts/report.py --offline --open
+```
+
+- 离线模式下若本地未装 `panda_data` SDK，会自动注入 stub 模块绕过 `factor.py` 顶层 import
+- pyarrow 19 与旧版 parquet 不兼容时，自动 fallback 到 `fastparquet` 引擎
+- `--dpi` 控制 PNG 体积（默认 100），`--html-path` / `--json-path` 自定义输出路径
+
 ## Agent 执行规则
 
 1. 先运行 `scripts/factor.py`，确认 Panda data 能返回持仓数据，且因子结果非空。
 2. 再运行 `scripts/validate.py`，确认字段完整、时间顺序正确、无未来函数问题。
-3. 最后运行 `scripts/backtest.py`，输出信号统计、IC/ICIR、分层收益等回测指标。
-4. 如果任一步失败，必须报告失败命令、错误信息和数据日期，不得直接进入生产。
+3. 接着运行 `scripts/backtest.py`，输出信号统计、IC/ICIR、分层收益等回测指标。
+4. 最后运行 `scripts/report.py`，生成 HTML 回测报告（含 4 图 + 8 指标卡 + Top 20 品种表）。
+5. 如果任一步失败，必须报告失败命令、错误信息和数据日期，不得直接进入生产。
 
 ## 成功标准
 
 - `factor.py` 能输出包含 `factor_value`、`score`、`rank`、`signal` 的结果。
 - `validate.py` 输出验证通过信息（含样本外 IC 稳定性检验）。
 - `backtest.py` 至少输出 IC、ICIR、信号频率、样本数。
+- `report.py` 能生成包含 4 张图、8 张指标卡片、Top 20 品种表的 self-contained HTML 报告。
 - IC、ICIR 必须基于 `get_future_daily` 返回的真实价格收益，严禁使用持仓 proxy 计算伪 IC。
 - 回测输出必须说明收益评估口径（严格口径 `forward_return = close_{t+1}/open_{t+1} - 1`），避免未来函数和偷价。
 - 结果中的 `data_version` 应为真实数据版本，例如 `real-v1`。
@@ -159,3 +179,5 @@ python scripts/validate.py
 - panda-data
 - pandas
 - numpy
+- matplotlib（HTML 报告生成，`scripts/report.py`）
+- fastparquet（pyarrow 19 与旧版 parquet 文件不兼容时的 fallback 引擎）

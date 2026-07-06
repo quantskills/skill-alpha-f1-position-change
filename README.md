@@ -2,7 +2,7 @@
 
 **简体中文** | [English](README.en.md)
 
-> 期货前 20 席位持仓突变 Alpha 因子：从 PandaAI 期货持仓数据计算多空突变信号，输出可验证的因子表与回测指标。
+> 期货前 20 席位持仓突变 Alpha 因子：从 PandaAI 期货持仓数据计算多空突变信号，输出可验证的因子表、回测指标与 HTML 可视化报告。
 
 <p align="center">
   <img alt="libraries" src="https://img.shields.io/badge/libraries-Futures%20Top20%20Position-blue">
@@ -23,7 +23,7 @@
 - 因子值验证、契约检查、IC 稳定性回测的完整工作流
 - Claude Code 对话中触发确定性因子计算与回测
 
-本 Skill 通过 `panda_data` SDK 拉取真实持仓与价格数据，输出因子表、回测指标（IC/ICIR/分层收益/Calmar）以及离线 fixture，便于 CI 集成。
+本 Skill 通过 `panda_data` SDK 拉取真实持仓与价格数据，输出因子表、回测指标（IC/ICIR/分层收益/Calmar）、HTML 可视化报告以及离线 fixture，便于 CI 集成。
 
 ## 仓库内容
 
@@ -33,8 +33,11 @@
 | `scripts/factor.py` | 因子计算入口（持仓 → 因子表） |
 | `scripts/validate.py` | 因子验证（契约检查 + IC 稳定性 + 离线模式） |
 | `scripts/backtest.py` | 回测评估（真实价格收益 IC/ICIR） |
+| `scripts/backtest_report_data.py` | 回测时序数据包装层（HTML 报告数据源） |
+| `scripts/report.py` | HTML 报告生成入口（matplotlib 静态图） |
 | `scripts/save_fixture.py` | 一次性生成离线测试 fixture |
 | `scripts/fixtures/` | 离线测试数据（Parquet 格式） |
+| `requirements.txt` | Python 依赖清单 |
 | `references/data_guide.md` | PandaAI 数据接口参考 |
 | `LICENSE` | GPLv3 协议 |
 | `README.md` / `README.en.md` | 中英文 README |
@@ -47,16 +50,22 @@ skill-alpha-f1-position-change/
 ├── README.md
 ├── README.en.md
 ├── LICENSE
+├── requirements.txt
 ├── references/
 │   └── data_guide.md
-└── scripts/
-    ├── factor.py            # 因子计算（含 load_position_data / load_price_data）
-    ├── validate.py          # 验证（含 check_factor_contract 11 条契约）
-    ├── backtest.py          # 回测（严格口径 forward_return）
-    ├── save_fixture.py      # 离线 fixture 生成
-    └── fixtures/            # 离线测试数据（首次运行后生成）
-        ├── sample_positions.parquet
-        └── sample_prices.parquet
+├── scripts/
+│   ├── factor.py                  # 因子计算（含 load_position_data / load_price_data）
+│   ├── validate.py                # 验证（含 check_factor_contract 11 条契约）
+│   ├── backtest.py                # 回测（严格口径 forward_return）
+│   ├── backtest_report_data.py    # 回测时序数据包装层（保留 curve / daily_ic / drawdown）
+│   ├── report.py                  # HTML 报告生成入口（matplotlib + base64）
+│   ├── save_fixture.py            # 离线 fixture 生成
+│   └── fixtures/                  # 离线测试数据（首次运行后生成）
+│       ├── sample_positions.parquet
+│       └── sample_prices.parquet
+└── reports/                       # 报告产物（.gitignored）
+    ├── backtest_result.json       # 中间数据（含全部时序）
+    └── report.html                # 最终 HTML 报告（self-contained）
 ```
 
 ## 数据要求
@@ -91,7 +100,7 @@ export PANDA_DATA_START_DATE=2026-01-01
 export PANDA_DATA_END_DATE=2026-03-31
 ```
 
-### 三步运行
+### 四步运行
 
 ```bash
 cd scripts/
@@ -107,6 +116,10 @@ python validate.py
 # 3. 回测评估
 python backtest.py
 # 输出：IC, ICIR, Rank IC, Rank ICIR, 分层收益, Calmar, MDD, 换手率
+
+# 4. HTML 报告生成
+python report.py
+# 输出：reports/report.html（self-contained，含 4 张图 base64 内嵌）
 ```
 
 ### 离线模式（CI 友好）
@@ -119,9 +132,14 @@ python save_fixture.py
 # 2. 后续验证无需联网
 export PANDA_DATA_OFFLINE=1
 python validate.py
+
+# 3. 离线生成 HTML 报告（无需凭证，自动用浏览器打开）
+python report.py --offline --open
 ```
 
 `check_factor_contract`（11 条契约断言）始终离线可跑，不依赖任何 fixture。
+
+离线模式下若本地未装 `panda_data` SDK，`report.py` 会自动注入 stub 模块绕过 `factor.py` 顶层 import；pyarrow 19 与旧版 parquet 不兼容时自动 fallback 到 `fastparquet`。
 
 ## 输入配置
 
@@ -190,6 +208,49 @@ confidence = |z|                  # 偏离横截面均值的标准差倍数
 | `data_version` | 数据版本（`real-v1`） |
 | `update_time` | 数据最新日期 + A股收盘时间 15:30（ISO 8601） |
 
+## HTML 回测报告
+
+`scripts/report.py` 把回测结果渲染成 self-contained 单 HTML 文件（base64 内嵌图表，离线可看），默认输出到 `reports/report.html`，同目录还有中间产物 `reports/backtest_result.json`。
+
+### 报告内容
+
+| 区块 | 说明 |
+|---|---|
+| 摘要卡片 | 8 个核心指标：IC / ICIR / Rank IC / Rank ICIR / IR(SHR*) / CR / ARR / MDD |
+| 样本统计 | 样本数、买入/卖出/持仓信号数、换手率 |
+| 分层收益对比 | Low 组 vs High 组平均收益及价差 |
+| 累计收益率与回撤 | 双子图：上为累计收益曲线，下为回撤填充 |
+| 每日 IC 时序 | Pearson IC 与 Rank IC 双线对比 |
+| 信号时间分布 | 按交易日堆叠的 buy/sell/hold 计数柱状图 |
+| Top 20 品种信号分布 | 水平堆叠条形图，按信号总数排序 |
+| Top 20 品种明细表 | 品种 / Buy / Sell / Hold / 总计 |
+| 评估口径 | 严格口径 `forward_return = close_{t+1}/open_{t+1} - 1` 说明 |
+
+### CLI 参数
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--offline` | False | 强制离线模式（用 fixtures，无需凭证） |
+| `--json-path` | `reports/backtest_result.json` | 中间 JSON 输出路径 |
+| `--html-path` | `reports/report.html` | 最终 HTML 输出路径 |
+| `--dpi` | 100 | 图表 DPI（控制 PNG 体积） |
+| `--open` | False | 生成后自动用默认浏览器打开 |
+
+### 示例
+
+```bash
+# 离线模式（最常用）
+python scripts/report.py --offline --open
+
+# 自定义输出路径
+python scripts/report.py --offline --html-path reports/custom.html
+
+# 减小 HTML 体积（适合邮件附件）
+python scripts/report.py --offline --dpi 80
+```
+
+报告章节内的图表标签全英文（避免 matplotlib 中文字体跨平台问题），HTML 文字部分中文。单个 HTML 约 250KB（dpi=100）。
+
 ## 运行大样本时的建议
 
 - **API 分批**：单次 API 调用 ≤ 8 个品种（`BATCH_SIZE = 8`），避免服务器超限
@@ -231,7 +292,7 @@ forward_return_t = close_{t+1} / open_{t+1} - 1
 
 ### 已完成（截至 2026-07）
 
-13 轮修复记录：
+14 轮修复记录：
 
 | 轮次 | 主题 |
 |---|---|
@@ -246,6 +307,7 @@ forward_return_t = close_{t+1} / open_{t+1} - 1
 | 10 | 纯多头品种 KeyError 防御 |
 | 11 | `_load_fixture_or_network` 联网 prices 加载 |
 | 12 | `update_time` 动态推导（数据最新日期 + 15:30） |
+| 13 | HTML 回测报告生成（`backtest_report_data.py` + `report.py` + matplotlib） |
 
 ### 已知未覆盖
 
