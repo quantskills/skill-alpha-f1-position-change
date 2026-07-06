@@ -39,6 +39,17 @@ tags: [quant, alpha, development, future]
 | net_position | 净持仓量 | get_future_netposi_rank |
 | position_type | 持仓类型(long/short) | 合并时添加 |
 
+## 输入契约
+
+调用 `load_position_data` / `panda_data.get_future_netposi_rank` 时的字段契约：
+
+- **underlying_symbol 格式**：品种代码（如 `"AP"`、`"AU"`），不含合约月份（`"AP801"` 错）、不含交易所后缀（`"AP.CZC"` 错）
+- **大小写**：必须大写（`"ap"` 不会工作）
+- **数据类型**：列表（`["AP", "AU"]`）；分批调用上限 `BATCH_SIZE = 8`，超出自动分批
+- **错误处理**：panda_data 静默跳过无效代码，返回空 DataFrame；本 skill 因 `combined_df.empty` 抛 `ValueError("未获取到期货持仓数据...")`
+- **接口返回字段契约**：必须包含 `underlying_symbol`、`date`、`broker_name`、`net_position` 三列。如接口字段名为 `symbol` / `code` / `instrument_id`，`validate_input` 会自动映射为 `underlying_symbol`，但会打印 `[INFO]` 警告
+- **调试模式**：设置环境变量 `PANDA_DATA_DEBUG=1` 后，首次成功 API 调用会打印接口返回字段名与前 3 行示例，便于排查契约不匹配问题
+
 ## 输出结果
 
 每日期生成一条记录，包含以下字段：
@@ -49,10 +60,10 @@ tags: [quant, alpha, development, future]
 | asset_type | 资产类型（future） |
 | symbol | 标的代码 |
 | factor_value | 因子原始值（多头变化率 - 空头变化率） |
-| score | 0-100 标准化评分 |
+| score | (0, 100) 标准化评分（z-score 经 logistic 映射，公式 `100/(1+exp(-z))`）；当日品种数 < 5 时降级为 NaN |
 | rank | 横截面排名 |
 | signal | 交易信号：`buy`（多头优势）/ `sell`（空头优势）/ `hold` |
-| confidence | 置信度 |
+| confidence | \|z-score\|，当日因子值偏离横截面均值的标准差倍数；当日品种数 < 5 时降级为 NaN |
 | long_total | 当前多头总持仓 |
 | short_total | 当前空头总持仓 |
 | prev_long_total | 前一日多头总持仓 |
@@ -77,7 +88,10 @@ Alpha 任务需要同时报告因子预测能力和策略层表现，不能只�
 
 - 不允许未来函数：因子在 `t` 日形成时，只能使用 `t` 日及以前可获得的数据。
 - 不允许偷价：策略评估不得假设用 `t` 日收盘后才知道的信号，在同一个 `t` 日收盘价成交。
-- 期货持仓数据通常在收盘后发布，本示例的策略层收益仅作为 MVP 演示口径；正式策略应考虑数据延迟和实际可交易性。
+- 成交时点：信号 `t` 日收盘后产生 → `t+1` 日开盘成交 → `t+1` 日收盘平仓（严格口径）。
+- 收益数据源：`forward_return` 必须来自 `panda_data.get_future_daily` 主力合约真实价格，不允许使用持仓差分 proxy。
+- forward_return 必须从 `t+1` 日开始取，不允许与因子共用 `t` 日数据（避免持仓自相关伪 IC）。
+- 期货持仓数据通常在收盘后发布，正式策略应考虑数据发布延迟和实际可交易性。
 
 ## 使用方式
 
@@ -92,6 +106,25 @@ python scripts/backtest.py
 运行前需要设置 `PANDA_DATA_USERNAME` 和 `PANDA_DATA_PASSWORD` 环境变量。
 可选设置 `PANDA_DATA_START_DATE` 和 `PANDA_DATA_END_DATE` 控制样本区间。
 
+### 离线验证模式（CI 友好）
+
+为支持 CI/无网络场景下的可复现验证，提供 fixture 离线模式：
+
+```bash
+# 1. 一次性生成 fixture（需联网 + 凭证）
+python scripts/save_fixture.py
+# 生成 scripts/fixtures/sample_positions.parquet + sample_prices.parquet
+
+# 2. 后续验证无需联网
+export PANDA_DATA_OFFLINE=1
+python scripts/validate.py
+```
+
+- `PANDA_DATA_OFFLINE=1`：从 `fixtures/` 加载固定数据，跳过联网调用
+- fixture 入 git，保证 bug 报告时可复现
+- 若仅生成 positions fixture（无 prices fixture），`check_ic_stability` 自动跳过，其它 check 全部正常
+- `check_factor_contract`（10 条契约断言）始终离线可跑，不依赖任何 fixture
+
 ## Agent 执行规则
 
 1. 先运行 `scripts/factor.py`，确认 Panda data 能返回持仓数据，且因子结果非空。
@@ -102,9 +135,10 @@ python scripts/backtest.py
 ## 成功标准
 
 - `factor.py` 能输出包含 `factor_value`、`score`、`rank`、`signal` 的结果。
-- `validate.py` 输出验证通过信息。
+- `validate.py` 输出验证通过信息（含样本外 IC 稳定性检验）。
 - `backtest.py` 至少输出 IC、ICIR、信号频率、样本数。
-- 回测输出必须说明收益评估口径，避免未来函数和偷价。
+- IC、ICIR 必须基于 `get_future_daily` 返回的真实价格收益，严禁使用持仓 proxy 计算伪 IC。
+- 回测输出必须说明收益评估口径（严格口径 `forward_return = close_{t+1}/open_{t+1} - 1`），避免未来函数和偷价。
 - 结果中的 `data_version` 应为真实数据版本，例如 `real-v1`。
 
 ## 与生产产物的关系

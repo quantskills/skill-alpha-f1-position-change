@@ -2,37 +2,45 @@ from __future__ import annotations
 
 import pandas as pd
 
-from factor import calculate_factor, load_position_data
+from factor import calculate_factor, load_position_data, load_price_data
 
 
-def build_forward_returns(positions: pd.DataFrame) -> pd.DataFrame:
-    """构建未来收益
+def build_forward_returns(prices: pd.DataFrame) -> pd.DataFrame:
+    """基于真实价格数据构建未来收益（修复"持仓自相关 IC"问题的核心）
 
-    对于期货持仓因子，使用多空持仓总变化作为收益 proxy。
-    注意：正式回测应使用期货价格数据计算真实收益。
+    严格口径（避免偷价）：
+        forward_return_t = close_{t+1} / open_{t+1} - 1
+    信号 t 日收盘后产生（持仓数据 t 日收盘后才发布），最早 t+1 日开盘才能成交，
+    t+1 日收盘平仓。这样保证因子和收益不共用 t 日数据，符合 SKILL.md "不允许偷价"要求。
+
+    Args:
+        prices: 价格 DataFrame，必须包含 date / symbol / open / close 字段。
+
+    Returns:
+        DataFrame，包含字段：
+        - trade_date: 信号产生的日期（YYYY-MM-DD 格式，对应 t 日）
+        - symbol: 品种代码
+        - forward_return: t+1 日 open → close 的真实价格收益
     """
-    # 按品种、日期和持仓类型分组求和
-    daily_total = positions.groupby(["underlying_symbol", "date", "position_type"])["net_position"].sum().reset_index()
-    pivot_df = daily_total.pivot(index=["underlying_symbol", "date"], columns="position_type", values="net_position").reset_index()
-    pivot_df = pivot_df.rename(columns={"long": "long_total", "short": "short_total"})
-    pivot_df["long_total"] = pivot_df["long_total"].fillna(0)
-    pivot_df["short_total"] = pivot_df["short_total"].fillna(0)
+    required = {"date", "symbol", "open", "close"}
+    missing = required - set(prices.columns)
+    if missing:
+        raise ValueError(f"价格数据缺少必要字段: {sorted(missing)}")
 
-    # 计算下一日持仓（按品种分组）
-    pivot_df = pivot_df.sort_values(["underlying_symbol", "date"])
-    pivot_df["next_long_total"] = pivot_df.groupby("underlying_symbol")["long_total"].shift(-1)
-    pivot_df["next_short_total"] = pivot_df.groupby("underlying_symbol")["short_total"].shift(-1)
+    df = prices.copy()
+    df = df.sort_values(["symbol", "date"])
 
-    # 计算净持仓变化作为 proxy
-    pivot_df["forward_return"] = (
-        (pivot_df["next_long_total"] - pivot_df["long_total"]) -
-        (pivot_df["next_short_total"] - pivot_df["short_total"])
-    ) / (pivot_df["long_total"].abs() + pivot_df["short_total"].abs() + 1e-6)
+    # 按 (symbol) 分组取次日 open / close
+    df["next_open"] = df.groupby("symbol")["open"].shift(-1)
+    df["next_close"] = df.groupby("symbol")["close"].shift(-1)
 
-    pivot_df["trade_date"] = pd.to_datetime(pivot_df["date"], format="%Y%m%d", errors="coerce").dt.strftime("%Y-%m-%d")
-    pivot_df["symbol"] = pivot_df["underlying_symbol"]
+    # 严格口径：t+1 日开盘成交，t+1 日收盘平仓
+    df["forward_return"] = df["next_close"] / df["next_open"] - 1
 
-    return pivot_df[["trade_date", "symbol", "forward_return"]].dropna()
+    # 日期格式转换（YYYYMMDD → YYYY-MM-DD），trade_date 对应因子形成的 t 日
+    df["trade_date"] = pd.to_datetime(df["date"], format="%Y%m%d", errors="coerce").dt.strftime("%Y-%m-%d")
+
+    return df[["trade_date", "symbol", "forward_return"]].dropna()
 
 
 def pearson_ic(x: pd.DataFrame) -> float:
@@ -70,7 +78,7 @@ def run_backtest() -> dict:
     """运行回测
 
     计算期货持仓因子的 IC、ICIR、分层收益等指标。
-    注意：本示例使用持仓变化作为收益 proxy，正式回测应使用期货价格数据。
+    收益基于 get_future_daily 主力合约真实价格，采用严格口径避免偷价。
     """
     # 加载原始持仓数据
     raw_positions = load_position_data()
@@ -78,8 +86,14 @@ def run_backtest() -> dict:
     # 计算因子
     factor = calculate_factor(input_data=raw_positions)
 
-    # 构建未来收益（使用持仓变化作为 proxy）
-    forward = build_forward_returns(raw_positions)
+    # 加载覆盖因子表的价格数据（按因子涉及的品种和日期范围）
+    factor_symbols = factor["symbol"].unique().tolist()
+    start_date = factor["trade_date"].min()
+    end_date = factor["trade_date"].max()
+    prices = load_price_data(symbols=factor_symbols, start_date=start_date, end_date=end_date)
+
+    # 基于真实价格收益构建 forward_return（严格口径：t+1 日 open → close）
+    forward = build_forward_returns(prices)
 
     # 合并数据（按日期和品种）
     panel = factor.merge(forward, on=["trade_date", "symbol"], how="inner")
@@ -88,8 +102,10 @@ def run_backtest() -> dict:
         raise ValueError("回测样本为空")
 
     # 按日期计算 IC 指标
-    daily_ic = panel.groupby("trade_date").apply(pearson_ic).dropna()
-    daily_rank_ic = panel.groupby("trade_date").apply(rank_ic).dropna()
+    # include_groups=False：pandas ≥2.2 默认会把 grouping 列传给 apply 函数并触发 FutureWarning，
+    # pearson_ic/rank_ic 内部只用 factor_value/forward_return 两列，不依赖 trade_date，明确排除即可
+    daily_ic = panel.groupby("trade_date").apply(pearson_ic, include_groups=False).dropna()
+    daily_rank_ic = panel.groupby("trade_date").apply(rank_ic, include_groups=False).dropna()
     ic = float(daily_ic.mean()) if not daily_ic.empty else 0.0
     icir = float(daily_ic.mean() / daily_ic.std()) if len(daily_ic) > 1 and daily_ic.std() else 0.0
     rank_ic_value = float(daily_rank_ic.mean()) if not daily_rank_ic.empty else 0.0
@@ -146,7 +162,7 @@ def run_backtest() -> dict:
         "卖出信号": sell_signals,
         "持仓信号": hold_signals,
         "品种信号分布": symbol_signals,
-        "评估口径": "因子在 t 日形成，基于 t 日及以前的持仓数据计算；收益使用持仓变化作为 proxy，正式回测应使用期货价格数据计算真实收益；正式策略应考虑数据发布延迟和实际可交易性。",
+        "评估口径": "因子在 t 日形成（基于 t 日及以前的持仓数据）；收益采用严格口径 forward_return = close_{t+1}/open_{t+1} - 1，即信号 t 日收盘后产生，t+1 日开盘成交、t+1 日收盘平仓，避免偷价；价格数据来源于 get_future_daily 主力合约。",
     }
 
 
