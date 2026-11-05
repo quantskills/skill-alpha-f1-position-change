@@ -181,3 +181,7 @@ python scripts/report.py --offline --open
 - numpy
 - matplotlib（HTML 报告生成，`scripts/report.py`）
 - fastparquet（pyarrow 19 与旧版 parquet 文件不兼容时的 fallback 引擎）
+
+## Pandadata compatibility
+
+[Pandadata 1.0.6 compatibility](references/pandadata-compatibility.md) — exact SDK baseline, validation scope, and shared guidance for all supported agent runtimes.

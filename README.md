@@ -327,3 +327,6 @@ forward_return_t = close_{t+1} / open_{t+1} - 1
 ## License
 
 [GPL-3.0](LICENSE) © 2026 PandaTest
+
+
+Pandadata 兼容维护：[abgyjaguo](https://github.com/abgyjaguo)，保留原项目作者署名。
