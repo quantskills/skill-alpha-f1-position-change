@@ -327,3 +327,6 @@ What this Skill does NOT do:
 ## License
 
 [GPL-3.0](LICENSE) © 2026 PandaTest
+
+
+Pandadata compatibility maintenance: [abgyjaguo](https://github.com/abgyjaguo). Existing authorship is retained.
